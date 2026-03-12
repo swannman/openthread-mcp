@@ -31,9 +31,10 @@ mcp = FastMCP(
     instructions=(
         "OpenThread CLI tools for monitoring and managing a Thread network "
         "via an Arduino Nano Matter. Use get_network_status for a quick "
-        "overview, get_topology for mesh structure, and get_diagnostics to "
-        "investigate specific devices. The send_command tool provides raw "
-        "CLI access for anything not covered by dedicated tools."
+        "overview, get_topology for mesh structure, and get_device_diagnostics "
+        "to investigate specific devices. If you need a CLI command that isn't "
+        "available as a dedicated tool, use request_command to describe what "
+        "you need — do not attempt to work around missing tools."
     ),
 )
 

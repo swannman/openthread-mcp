@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 5.0
 # Longer timeout for commands that take time (scan, ping, diagnostics)
 LONG_TIMEOUT = 15.0
+# Max retries on timeout before giving up
+MAX_RETRIES = 1
 
 
 class OTCLIError(Exception):
@@ -27,6 +29,10 @@ class OTCLIConnection:
 
     Thread-safe: a lock serialises command execution so multiple MCP tool
     calls won't interleave on the wire.
+
+    Handles RA4M1 bridge quirks:
+    - Sends a sync newline after opening to wake the CDC interface
+    - Retries once with a reconnect on timeout (bridge sometimes stalls)
     """
 
     def __init__(self, port: str, baudrate: int = 115200):
@@ -43,6 +49,10 @@ class OTCLIConnection:
         time.sleep(1.5)
         # Drain any boot output
         self._ser.reset_input_buffer()
+        # Send a sync newline to wake the CLI prompt
+        self._ser.write(b"\r\n")
+        time.sleep(0.3)
+        self._ser.reset_input_buffer()
         logger.info("Serial connection opened on %s @ %d", self.port, self.baudrate)
 
     def close(self) -> None:
@@ -55,14 +65,30 @@ class OTCLIConnection:
     def is_open(self) -> bool:
         return self._ser is not None and self._ser.is_open
 
+    def reconnect(self) -> None:
+        """Close and reopen the serial connection."""
+        logger.warning("Reconnecting serial port %s", self.port)
+        self.close()
+        time.sleep(1)
+        self.open()
+
     def send_command(self, command: str, timeout: float = DEFAULT_TIMEOUT) -> str:
         """Send a CLI command and return the response text.
 
         Blocks until 'Done' or 'Error' is received, or timeout expires.
+        Retries once with a reconnect on timeout.
         Raises OTCLIError on CLI errors, TimeoutError on timeout.
         """
         with self._lock:
-            return self._send_command_locked(command, timeout)
+            try:
+                return self._send_command_locked(command, timeout)
+            except TimeoutError:
+                # Retry once after reconnect
+                logger.warning(
+                    "Timeout on '%s', reconnecting and retrying", command
+                )
+                self.reconnect()
+                return self._send_command_locked(command, timeout)
 
     def _send_command_locked(self, command: str, timeout: float) -> str:
         if not self.is_open:

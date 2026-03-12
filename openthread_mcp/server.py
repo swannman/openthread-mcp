@@ -252,6 +252,212 @@ def get_device_diagnostics(rloc16: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# DNS
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def dns_resolve(hostname: str) -> str:
+    """Resolve a hostname to IPv6 addresses via Thread DNS.
+
+    Uses the network's SRP/DNS infrastructure (advertised by border
+    routers) to resolve names. Useful for verifying SRP service
+    registration and border router DNS functionality.
+
+    Args:
+        hostname: The hostname to resolve (e.g. "my-device.default.service.arpa").
+    """
+    conn = _get_conn()
+    try:
+        raw = conn.send_command(f"dns resolve {hostname}", timeout=LONG_TIMEOUT)
+        return raw
+    except OTCLIError as e:
+        return f"DNS resolution failed: {e}"
+    except TimeoutError:
+        return "DNS resolution timed out — no DNS server may be reachable."
+
+
+@mcp.tool()
+def dns_browse(service_type: str = "_tcp.default.service.arpa") -> str:
+    """Browse for DNS-SD services registered on the Thread network.
+
+    Queries the SRP server for service instances of the given type.
+    Default browses all TCP services. Common types:
+    - _tcp.default.service.arpa (all TCP services)
+    - _udp.default.service.arpa (all UDP services)
+
+    Args:
+        service_type: DNS-SD service type to browse.
+    """
+    conn = _get_conn()
+    try:
+        raw = conn.send_command(f"dns browse {service_type}", timeout=LONG_TIMEOUT)
+        return raw
+    except OTCLIError as e:
+        return f"DNS browse failed: {e}"
+    except TimeoutError:
+        return "DNS browse timed out — no DNS server may be reachable."
+
+
+@mcp.tool()
+def dns_service(instance_name: str, service_type: str) -> str:
+    """Resolve a specific DNS-SD service instance to get host, port, and TXT records.
+
+    Use after dns_browse to get details on a specific service instance.
+
+    Args:
+        instance_name: The service instance name (from dns_browse results).
+        service_type: The service type (e.g. "_ipps._tcp.default.service.arpa").
+    """
+    conn = _get_conn()
+    try:
+        raw = conn.send_command(
+            f"dns service {instance_name} {service_type}", timeout=LONG_TIMEOUT
+        )
+        return raw
+    except OTCLIError as e:
+        return f"DNS service lookup failed: {e}"
+    except TimeoutError:
+        return "DNS service lookup timed out."
+
+
+# ---------------------------------------------------------------------------
+# Uptime / info
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_uptime() -> str:
+    """Get device uptime since last reset."""
+    conn = _get_conn()
+    return conn.send_command("uptime")
+
+
+@mcp.tool()
+def get_buffer_info() -> str:
+    """Get message buffer utilisation.
+
+    Shows total, free, and max-used buffer counts plus per-component
+    breakdown. Useful for detecting memory pressure on the device.
+    """
+    conn = _get_conn()
+    raw = conn.send_command("bufferinfo")
+    return raw
+
+
+@mcp.tool()
+def get_sockets() -> str:
+    """Get open UDP/TCP sockets (netstat).
+
+    Shows local and peer addresses for all open connections. Useful for
+    verifying SRP client connectivity and MLE session state.
+    """
+    conn = _get_conn()
+    raw = conn.send_command("netstat")
+    return json.dumps(parse_table(raw), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Link metrics
+# ---------------------------------------------------------------------------
+
+
+def _ext_mac_to_link_local(ext_mac: str) -> str:
+    """Convert an extended MAC (EUI-64) to an IPv6 link-local address.
+
+    Follows RFC 4291 modified EUI-64: flip bit 6 of the first byte,
+    then format as fe80::<hh><hh>:<hh>ff:fe<hh>:<hh><hh>.
+    """
+    mac = ext_mac.lower().replace(":", "").replace("-", "")
+    if len(mac) != 16:
+        raise ValueError(f"Invalid extended MAC length: {ext_mac}")
+    # Flip the universal/local bit (bit 6 of first byte)
+    first_byte = int(mac[0:2], 16) ^ 0x02
+    b = bytes([first_byte]) + bytes.fromhex(mac[2:])
+    return f"fe80::{b[0]:02x}{b[1]:02x}:{b[2]:02x}{b[3]:02x}:{b[4]:02x}{b[5]:02x}:{b[6]:02x}{b[7]:02x}"
+
+
+@mcp.tool()
+def get_link_metrics(rloc16: str) -> str:
+    """Query enhanced link metrics from a direct neighbor.
+
+    Sends a Single Probe requesting PDU count, LQI, link margin, and
+    RSSI. The target must be a direct neighbor (visible in neighbor table).
+    Automatically looks up the neighbor's extended MAC and derives its
+    link-local address.
+
+    Args:
+        rloc16: RLOC16 of the neighbor (e.g. "0x4000").
+    """
+    conn = _get_conn()
+
+    # Get neighbor table to find extended MAC for this RLOC16
+    raw = conn.send_command("neighbor table")
+    neighbors = parse_table(raw)
+
+    target_rloc = rloc16.lower().replace("0x", "")
+    ext_mac = None
+    for n in neighbors:
+        n_rloc = n.get("RLOC16", "").lower().replace("0x", "")
+        if n_rloc == target_rloc:
+            ext_mac = n.get("Extended MAC")
+            break
+
+    if not ext_mac:
+        return json.dumps({
+            "error": f"RLOC16 {rloc16} not found in neighbor table. "
+                     "Link metrics only works for direct neighbors.",
+            "neighbors": [n.get("RLOC16") for n in neighbors],
+        })
+
+    try:
+        link_local = _ext_mac_to_link_local(ext_mac)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+
+    try:
+        raw = conn.send_command(
+            f"linkmetrics request {link_local} single pqmr",
+            timeout=LONG_TIMEOUT,
+        )
+        return raw
+    except OTCLIError as e:
+        return f"Link metrics query failed: {e}"
+    except TimeoutError:
+        return f"Link metrics query timed out for {rloc16}."
+
+
+@mcp.tool()
+def reset_device_counters(rloc16: str) -> str:
+    """Reset MAC counters on a remote Thread device.
+
+    Sends a Network Diagnostic Reset to the target device to zero out
+    its MAC counters. Useful after fixing an issue to verify errors stop.
+
+    Args:
+        rloc16: RLOC16 of the target device (e.g. "0xd000").
+    """
+    conn = _get_conn()
+
+    prefix_raw = conn.send_command("dataset active")
+    prefix_data = parse_dataset(prefix_raw)
+    mesh_prefix = prefix_data.get("Mesh Local Prefix", "").replace("/64", "").rstrip(":")
+    rloc_hex = rloc16.lower().replace("0x", "")
+    addr = f"{mesh_prefix}:0:ff:fe00:{rloc_hex}"
+
+    try:
+        # TLV type 9 = MAC Counters
+        raw = conn.send_command(
+            f"networkdiagnostic reset {addr} 9", timeout=LONG_TIMEOUT
+        )
+        return f"Counter reset sent to {rloc16}. Response: {raw}"
+    except OTCLIError as e:
+        return f"Counter reset failed: {e}"
+    except TimeoutError:
+        return f"Counter reset sent to {rloc16} (no acknowledgement received)."
+
+
+# ---------------------------------------------------------------------------
 # Active probing
 # ---------------------------------------------------------------------------
 

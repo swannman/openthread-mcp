@@ -1,0 +1,16 @@
+[project]
+name = "openthread-mcp"
+version = "0.1.0"
+description = "MCP server for OpenThread CLI on Arduino Nano Matter"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+openthread-mcp = "openthread_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

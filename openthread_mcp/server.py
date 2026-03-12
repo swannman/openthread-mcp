@@ -324,6 +324,128 @@ def thread_stop() -> str:
 
 
 @mcp.tool()
+def get_preferred_role() -> str:
+    """Get the device's current Thread role preference and weight.
+
+    Returns the current state, router eligibility mode, weight,
+    and upgrade/downgrade thresholds.
+    """
+    conn = _get_conn()
+    fields = {}
+    for cmd in [
+        "state",
+        "mode",
+        "leaderweight",
+        "routerupgradethreshold",
+        "routerdowngradethreshold",
+        "partitionid",
+    ]:
+        try:
+            fields[cmd] = conn.send_command(cmd)
+        except (OTCLIError, TimeoutError) as e:
+            fields[cmd] = f"error: {e}"
+
+    return json.dumps(fields, indent=2)
+
+
+@mcp.tool()
+def set_preferred_role(role: str) -> str:
+    """Change this device's Thread role.
+
+    Can promote the device to router, demote to child, or force leader
+    election. The network will rebalance automatically.
+
+    Args:
+        role: Target role — "router", "child", or "leader".
+              "router" requests promotion (may take a few seconds).
+              "child" forces demotion from router.
+              "leader" forces a leader election (use with caution).
+    """
+    conn = _get_conn()
+    role = role.strip().lower()
+    if role not in ("router", "child", "leader"):
+        return f"Invalid role '{role}'. Must be 'router', 'child', or 'leader'."
+    conn.send_command(f"state {role}")
+    return f"Role change to '{role}' requested."
+
+
+@mcp.tool()
+def set_leader_weight(weight: int) -> str:
+    """Set this device's leader weight (0-255).
+
+    Higher weight makes the device more likely to become leader during
+    a partition merge or leader election. Default is 64. Set to 0 to
+    make the device never become leader.
+
+    Changes take effect at the next leader election. To trigger one
+    immediately, use set_preferred_role with role="leader".
+
+    Args:
+        weight: Leader weight (0-255). Higher = more likely to lead.
+    """
+    conn = _get_conn()
+    if not 0 <= weight <= 255:
+        return "Weight must be 0-255."
+    conn.send_command(f"leaderweight {weight}")
+    return f"Leader weight set to {weight}."
+
+
+@mcp.tool()
+def set_router_thresholds(
+    upgrade: int | None = None,
+    downgrade: int | None = None,
+) -> str:
+    """Set the router upgrade and downgrade thresholds.
+
+    These control when the device promotes from child to router
+    (upgrade) and when it demotes from router to child (downgrade).
+    The thresholds represent the number of routers in the network.
+
+    Args:
+        upgrade: Promote to router when fewer than this many routers
+                 exist (default 16). Set lower to reduce router count.
+        downgrade: Demote to child when more than this many routers
+                   exist (default 23). Set higher to keep more routers.
+    """
+    conn = _get_conn()
+    results = []
+    if upgrade is not None:
+        conn.send_command(f"routerupgradethreshold {upgrade}")
+        results.append(f"upgrade={upgrade}")
+    if downgrade is not None:
+        conn.send_command(f"routerdowngradethreshold {downgrade}")
+        results.append(f"downgrade={downgrade}")
+    if not results:
+        return "No thresholds changed. Provide upgrade and/or downgrade."
+    return f"Router thresholds set: {', '.join(results)}."
+
+
+@mcp.tool()
+def set_mode(rx_on_idle: bool = True, ftd: bool = True, network_data: bool = True) -> str:
+    """Set the device's MLE mode flags.
+
+    Controls how the device participates in the Thread network.
+
+    Args:
+        rx_on_idle: Keep radio on when idle (True for routers, False saves power).
+        ftd: Full Thread Device (True) vs Minimal Thread Device (False).
+        network_data: Request full network data (True) vs stable-only (False).
+    """
+    conn = _get_conn()
+    mode = ""
+    if rx_on_idle:
+        mode += "r"
+    if ftd:
+        mode += "d"
+    if network_data:
+        mode += "n"
+    if not mode:
+        mode = "-"
+    conn.send_command(f"mode {mode}")
+    return f"Mode set to '{mode}'."
+
+
+@mcp.tool()
 def device_reset() -> str:
     """Soft-reset the Thread device. The dataset and network credentials
     persist across resets. The device will rejoin the network automatically

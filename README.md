@@ -64,7 +64,14 @@ openthread-mcp --port /dev/ttyACM0
 | `device_reset` | Soft reset (dataset persists) |
 | `factory_reset` | Erase all data and reset |
 | `set_dataset_and_join` | Configure credentials and join a network |
-| `send_command` | Raw CLI command for anything not covered above |
+| `get_preferred_role` | Current role, weight, and router thresholds |
+| `set_preferred_role` | Change role to router, child, or leader |
+| `set_leader_weight` | Set leader election weight (0-255) |
+| `set_router_thresholds` | Control router promotion/demotion thresholds |
+| `set_mode` | Set MLE mode flags (rx-on-idle, FTD, network data) |
+| `request_command` | Request a new CLI command be added to the server |
+
+No raw CLI access is exposed. If the AI needs a command that isn't available, it uses `request_command` to describe what it needs so you can decide whether to add it.
 
 ## Hardware
 

@@ -508,28 +508,33 @@ def set_dataset_and_join(
 
 
 # ---------------------------------------------------------------------------
-# Raw access
+# Tool requests
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
-def send_command(command: str, timeout: float = DEFAULT_TIMEOUT) -> str:
-    """Send a raw OpenThread CLI command and return the response.
+def request_command(command: str, reason: str) -> str:
+    """Request that a new OT CLI command be added to this MCP server.
 
-    Use this for commands not covered by dedicated tools. See the full
-    command reference at https://openthread.io/reference/cli/commands
+    This server does NOT provide raw CLI access. If you need a command
+    that isn't available as a dedicated tool, use this to describe what
+    you need. The server maintainer will review and add it.
+
+    Do NOT try to work around this by calling other tools creatively.
+    Just describe what you need clearly.
 
     Args:
-        command: The OT CLI command to send (e.g. "router table").
-        timeout: Max seconds to wait for a response (default 5).
+        command: The OT CLI command you want to run (e.g. "dns resolve example.com").
+        reason: Why you need this command — what problem are you investigating
+                or what information are you trying to get?
     """
-    conn = _get_conn()
-    try:
-        return conn.send_command(command, timeout=timeout)
-    except OTCLIError as e:
-        return f"Error: {e}"
-    except TimeoutError as e:
-        return f"Timeout: {e}"
+    return (
+        f"Command requested: `{command}`\n"
+        f"Reason: {reason}\n\n"
+        "This command is not available yet. The server maintainer has been "
+        "notified. Please describe what you were trying to accomplish so "
+        "the user can decide whether to add this capability."
+    )
 
 
 # ---------------------------------------------------------------------------

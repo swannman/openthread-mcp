@@ -719,6 +719,83 @@ def set_dataset_and_join(
 # ---------------------------------------------------------------------------
 
 
+# OT CLI commands available in our firmware (from `help` output).
+# Used by request_command to distinguish "could expose but haven't"
+# from "not an OT CLI command at all".
+_AVAILABLE_CLI_COMMANDS = {
+    "attachtime", "bbr", "bufferinfo", "ccathreshold", "channel", "child",
+    "childip", "childmax", "childrouterlinks", "childsupervision",
+    "childtimeout", "contextreusedelay", "counters", "csl", "dataset",
+    "debug", "delaytimermin", "detach", "deviceprops", "diag", "discover",
+    "dns", "domainname", "dua", "eidcache", "eui64", "extaddr", "extpanid",
+    "factoryreset", "fem", "ifconfig", "instanceid", "ipaddr", "ipmaddr",
+    "joinerport", "keysequence", "leaderdata", "leaderweight", "linkmetrics",
+    "log", "mac", "mode", "multiradio", "neighbor", "netdata", "netstat",
+    "networkdiagnostic", "networkidtimeout", "networkkey", "networkkeyref",
+    "networkname", "nexthop", "panid", "parent", "parentpriority",
+    "partitionid", "ping", "platform", "pollperiod", "preferrouterid",
+    "promiscuous", "pskc", "pskcref", "rcp", "region", "releaserouterid",
+    "reset", "rloc16", "router", "routerdowngradethreshold",
+    "routereligible", "routerselectionjitter", "routerupgradethreshold",
+    "scan", "singleton", "srp", "state", "targetpower", "thread", "txpower",
+    "udp", "unsecureport", "uptime", "vendor", "version",
+}
+
+# Commands we intentionally chose NOT to expose as tools (yet), with reasons.
+_UNEXPOSED_COMMANDS = {
+    "bbr": "Backbone Router commands — our device is not a backbone router",
+    "ccathreshold": "CCA threshold tuning — low-level radio config",
+    "childmax": "Max children setting — rarely needs changing",
+    "childrouterlinks": "Child-router link limit — advanced mesh tuning",
+    "childsupervision": "Child supervision interval — for sleepy device debugging",
+    "childtimeout": "Child timeout — affects sleepy device keepalive",
+    "contextreusedelay": "6LoWPAN context reuse delay — advanced mesh config",
+    "csl": "Coordinated Sampled Listening — for sleepy endpoints",
+    "debug": "Debug commands — low-level firmware debugging",
+    "delaytimermin": "Minimum delay timer for pending dataset — advanced",
+    "detach": "Detach from network (use thread_stop instead)",
+    "deviceprops": "Device properties — low-level device info",
+    "diag": "Radio diagnostics mode — takes device off-network for RF testing",
+    "discover": "Thread network discovery — similar to scan but Thread-specific",
+    "domainname": "Thread domain name — rarely used outside enterprise",
+    "dua": "Domain Unicast Address — enterprise Thread feature",
+    "eidcache": "EID-to-RLOC cache — advanced routing debug",
+    "fem": "Front-End Module config — hardware-specific RF config",
+    "instanceid": "Thread instance ID",
+    "ipmaddr": "Multicast group membership — debug multicast routing",
+    "joinerport": "Joiner UDP port — commissioning config",
+    "keysequence": "Security key sequence counter — advanced security",
+    "log": "Device-side log level control",
+    "mac": "Raw MAC layer commands (retries, counters by subtypes)",
+    "multiradio": "Multi-radio link info — for devices with multiple radios",
+    "networkidtimeout": "Network ID timeout — advanced mesh config",
+    "networkkey": "Get/set network key (use get_dataset or set_dataset_and_join)",
+    "networkkeyref": "Network key reference — PSA crypto key ID",
+    "networkname": "Get/set network name (use get_network_status or get_dataset)",
+    "nexthop": "Next hop lookup for a destination — routing debug",
+    "parent": "Parent info (when device is a child)",
+    "parentpriority": "Parent priority — affects child attachment preference",
+    "partitionid": "Partition ID (available in get_network_status)",
+    "platform": "Platform-specific commands",
+    "pollperiod": "Data poll period — for sleepy end devices",
+    "preferrouterid": "Preferred router ID — request a specific router ID",
+    "promiscuous": "Promiscuous mode — capture all 802.15.4 frames",
+    "pskc": "Pre-Shared Key for Commissioner (use get_dataset)",
+    "pskcref": "PSKc reference — PSA crypto key ID",
+    "rcp": "Radio Co-Processor commands — not applicable to SoC",
+    "region": "Regulatory region — set once at deployment",
+    "releaserouterid": "Release a router ID — advanced mesh management",
+    "routereligible": "Router eligibility (use set_mode instead)",
+    "routerselectionjitter": "Router selection jitter — tune promotion timing",
+    "singleton": "Check if device is the only router",
+    "srp": "SRP client commands — service registration",
+    "targetpower": "Target TX power config",
+    "udp": "Raw UDP send/receive — low-level networking",
+    "unsecureport": "Unsecured port config — advanced commissioning",
+    "vendor": "Vendor name/model/URL",
+}
+
+
 @mcp.tool()
 def request_command(command: str, reason: str) -> str:
     """Request that a new OT CLI command be added to this MCP server.
@@ -735,12 +812,41 @@ def request_command(command: str, reason: str) -> str:
         reason: Why you need this command — what problem are you investigating
                 or what information are you trying to get?
     """
+    # Extract the base command (first word)
+    base_cmd = command.strip().split()[0].lower() if command.strip() else ""
+
+    # Check if this is even an OT CLI command
+    if base_cmd not in _AVAILABLE_CLI_COMMANDS:
+        return (
+            f"'{base_cmd}' is not an OpenThread CLI command. This MCP server "
+            f"only interfaces with the OpenThread CLI on the Arduino. If you "
+            f"need to do something outside of Thread network management, use "
+            f"a different tool or ask the user directly.\n\n"
+            f"Your request: `{command}`\n"
+            f"Reason: {reason}"
+        )
+
+    # Check if we intentionally chose not to expose it
+    if base_cmd in _UNEXPOSED_COMMANDS:
+        note = _UNEXPOSED_COMMANDS[base_cmd]
+        return (
+            f"'{base_cmd}' is a valid OT CLI command but is not currently "
+            f"exposed as a tool.\n"
+            f"Reason it was excluded: {note}\n\n"
+            f"Your request: `{command}`\n"
+            f"Your reason: {reason}\n\n"
+            f"The server maintainer will review whether to add this. Please "
+            f"describe what you were trying to accomplish so the user can "
+            f"decide whether this capability should be added."
+        )
+
+    # It's a valid command we haven't categorised — might be an oversight
     return (
-        f"Command requested: `{command}`\n"
-        f"Reason: {reason}\n\n"
-        "This command is not available yet. The server maintainer has been "
-        "notified. Please describe what you were trying to accomplish so "
-        "the user can decide whether to add this capability."
+        f"'{base_cmd}' is a valid OT CLI command that hasn't been exposed "
+        f"as a tool yet. This may be an oversight.\n\n"
+        f"Your request: `{command}`\n"
+        f"Your reason: {reason}\n\n"
+        f"The server maintainer will review and add this if appropriate."
     )
 
 

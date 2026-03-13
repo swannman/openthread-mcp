@@ -273,21 +273,23 @@ def update_devices_from_dns(devices: dict, dns_names: dict,
                             hap_rlocs: dict[str, str] | None = None) -> bool:
     """Store discovered DNS-SD names and rename border routers. Returns True if changed."""
     changed = False
-    # Store border router names
+    # Store border router names (merge with previous, preserving names not seen this cycle)
     meshcop = dns_names.get("_meshcop._udp.default.service.arpa", [])
     if meshcop:
         key = "_meshcop_names"
-        old = devices.get(key)
-        if old != meshcop:
-            devices[key] = meshcop
+        old = devices.get(key, [])
+        merged = sorted(set(old) | set(meshcop))
+        if old != merged:
+            devices[key] = merged
             changed = True
-    # Store HAP device names
+    # Store HAP device names (merge with previous)
     hap = dns_names.get("_hap._udp.default.service.arpa", [])
     if hap:
         key = "_hap_names"
-        old = devices.get(key)
-        if old != hap:
-            devices[key] = hap
+        old = devices.get(key, [])
+        merged = sorted(set(old) | set(hap))
+        if old != merged:
+            devices[key] = merged
             changed = True
     # Rename border routers using resolved EUI-64 -> room name
     if meshcop_eui64s:
@@ -306,9 +308,9 @@ def update_devices_from_dns(devices: dict, dns_names: dict,
                 devices[eui_key] = room_name
                 logger.info("Added border router %s -> '%s'", eui_key, room_name)
                 changed = True
-    # Store HAP device -> device name correlations
+    # Store HAP device -> device name correlations (merge with previous)
     if hap_rlocs:
-        hap_map = {}
+        hap_map = dict(devices.get("_hap_device_map") or {})
         for rloc16, hap_name in hap_rlocs.items():
             device_name = _device_name(devices, rloc16)
             if device_name:

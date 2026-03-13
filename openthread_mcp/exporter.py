@@ -161,6 +161,59 @@ def resolve_meshcop_eui64s(conn: OTCLIConnection,
     return result
 
 
+def resolve_hap_to_rloc(conn: OTCLIConnection,
+                        hap_names: list[str]) -> dict[str, str]:
+    """Resolve HAP devices to RLOC16 via DNS hostname → ML-EID → ping → eidcache.
+
+    Returns {rloc16: hap_name} e.g. {"0xD000": "Eve Energy C8B7"}.
+    """
+    # Step 1: Resolve hostnames to ML-EID addresses
+    ml_eids = {}  # ml_eid -> hap_name
+    for name in hap_names:
+        try:
+            hostname = name.replace(" ", "-") + ".default.service.arpa."
+            escaped_hostname = hostname.replace(" ", "\\ ")
+            response = conn.send_command(
+                f"dns resolve {escaped_hostname}", timeout=LONG_TIMEOUT
+            )
+            # Parse "DNS response for ... - <addr> TTL:300"
+            m = re.search(r"-\s+(fd[0-9a-f:]+)\s+TTL", response)
+            if m:
+                ml_eids[m.group(1)] = name
+        except (OTCLIError, TimeoutError) as e:
+            logger.debug("dns resolve '%s' failed: %s", name, e)
+
+    if not ml_eids:
+        return {}
+
+    logger.info("Resolved %d HAP hostnames to ML-EIDs", len(ml_eids))
+
+    # Step 2: Ping each to populate the EID cache
+    for addr in ml_eids:
+        try:
+            conn.send_command(f"ping {addr} 1 1 1", timeout=LONG_TIMEOUT)
+        except (OTCLIError, TimeoutError):
+            pass
+
+    # Step 3: Read EID cache to get RLOC16 mappings
+    result = {}
+    try:
+        cache = conn.send_command("eidcache")
+        for line in cache.strip().split("\n"):
+            parts = line.split()
+            if len(parts) >= 2:
+                eid_addr = parts[0]
+                rloc_hex = parts[1]
+                if eid_addr in ml_eids:
+                    rloc16 = _normalize_rloc16(f"0x{rloc_hex}")
+                    result[rloc16] = ml_eids[eid_addr]
+                    logger.info("HAP '%s' -> RLOC %s", ml_eids[eid_addr], rloc16)
+    except (OTCLIError, TimeoutError) as e:
+        logger.warning("eidcache failed: %s", e)
+
+    return result
+
+
 def load_devices(path: str) -> dict:
     """Load devices.json."""
     try:
@@ -216,7 +269,8 @@ def update_devices_from_topology(devices: dict, routers: list[dict],
 
 
 def update_devices_from_dns(devices: dict, dns_names: dict,
-                            meshcop_eui64s: dict[str, str] | None = None) -> bool:
+                            meshcop_eui64s: dict[str, str] | None = None,
+                            hap_rlocs: dict[str, str] | None = None) -> bool:
     """Store discovered DNS-SD names and rename border routers. Returns True if changed."""
     changed = False
     # Store border router names
@@ -252,6 +306,20 @@ def update_devices_from_dns(devices: dict, dns_names: dict,
                 devices[eui_key] = room_name
                 logger.info("Added border router %s -> '%s'", eui_key, room_name)
                 changed = True
+    # Store HAP device -> device name correlations
+    if hap_rlocs:
+        hap_map = {}
+        for rloc16, hap_name in hap_rlocs.items():
+            device_name = _device_name(devices, rloc16)
+            if device_name:
+                hap_map[hap_name] = device_name
+        key = "_hap_device_map"
+        old = devices.get(key)
+        if old != hap_map and hap_map:
+            devices[key] = hap_map
+            changed = True
+            for hap_name, dev_name in hap_map.items():
+                logger.info("HAP correlation: '%s' = '%s'", hap_name, dev_name)
     return changed
 
 
@@ -496,7 +564,13 @@ def run_once(port: str, baudrate: int, prom_path: str, devices_path: str) -> Non
         if meshcop_names:
             logger.info("Resolving %d border router EUI-64s...", len(meshcop_names))
             meshcop_eui64s = resolve_meshcop_eui64s(conn, meshcop_names)
-        if update_devices_from_dns(devices, dns_names, meshcop_eui64s):
+        # Resolve HAP devices to RLOC16 via EID cache
+        hap_rlocs = {}
+        hap_names = dns_names.get("_hap._udp.default.service.arpa", [])
+        if hap_names:
+            logger.info("Resolving %d HAP devices to RLOC16...", len(hap_names))
+            hap_rlocs = resolve_hap_to_rloc(conn, hap_names)
+        if update_devices_from_dns(devices, dns_names, meshcop_eui64s, hap_rlocs):
             devices_changed = True
 
         # Save updated devices if changed

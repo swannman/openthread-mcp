@@ -1,6 +1,11 @@
 # openthread-mcp
 
-MCP server for monitoring and managing a Thread network via the OpenThread CLI on an Arduino Nano Matter.
+MCP server and Prometheus exporter for monitoring and managing a Thread network via the OpenThread CLI on an Arduino Nano Matter.
+
+Two entry points share the same serial transport and CLI parser:
+
+- **`openthread-mcp`** — MCP server exposing Thread CLI tools to Claude Code
+- **`openthread-exporter`** — Periodic health exporter that writes Prometheus metrics to a textfile collector
 
 ## Setup
 
@@ -10,7 +15,7 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-## Usage
+## MCP Server
 
 ### As a standalone server (stdio transport)
 
@@ -40,6 +45,75 @@ openthread-mcp --port /dev/ttyACM0
     }
   }
 }
+```
+
+## Prometheus Exporter
+
+The exporter runs a single collection cycle then exits — designed to be triggered by a systemd timer.
+
+```bash
+openthread-exporter --port /dev/ttyACM1 \
+  --prom-file /var/lib/alloy/textfile_collector/thread_active.prom \
+  --devices-file /opt/thread-monitor/devices.json
+```
+
+Each cycle:
+
+1. **Topology** — collects router, neighbor, and child tables
+2. **Pings** — ICMPv6 ping to each neighbor via link-local address
+3. **DNS-SD discovery** — browses `_hap._udp` and `_meshcop._udp` services
+4. **Border router resolution** — extracts EUI-64 from meshcop TXT `xa` field, maps room names to devices
+5. **HAP device correlation** — resolves HAP hostnames → ML-EID → ping → eidcache → RLOC16, correlating manufacturer names (e.g. "Eve Energy C8B7") with user-assigned names (e.g. "Deck Lights")
+6. **Device map update** — merges new discoveries into `devices.json` (shared with the passive sniffer), preserving entries from previous cycles for sleepy devices
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `thread_active_probe_info` | Probe device state and RLOC16 |
+| `thread_active_router_count` | Number of routers in the mesh |
+| `thread_active_neighbor_count` | Direct neighbors of the probe |
+| `thread_active_child_count` | Children attached to the probe |
+| `thread_active_leader_info` | Current leader with RLOC16, device name, partition ID |
+| `thread_active_neighbor_rssi` | Neighbor RSSI from mesh (dBm) |
+| `thread_active_neighbor_last_rssi` | Last RSSI from neighbor (dBm) |
+| `thread_active_router_link_quality` | Router link quality (0–3) |
+| `thread_active_router_path_cost` | Router path cost |
+| `thread_active_ping_rtt` | Ping RTT (ms, -1 = timeout) |
+| `thread_active_ping_reachable` | Neighbor reachable (1/0) |
+| `thread_active_hap_devices` | HomeKit accessory count |
+| `thread_active_border_routers` | Border router count |
+| `thread_active_hap_device_info` | Per-device HAP info label |
+| `thread_active_border_router_info` | Per-device border router info label |
+
+### systemd timer
+
+```ini
+# /etc/systemd/system/thread-active-exporter.service
+[Unit]
+Description=Thread active health exporter
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/openthread-mcp/.venv/bin/openthread-exporter \
+  --port /dev/ttyACM1 \
+  --prom-file /var/lib/alloy/textfile_collector/thread_active.prom \
+  --devices-file /opt/thread-monitor/devices.json
+User=root
+TimeoutStartSec=120
+
+# /etc/systemd/system/thread-active-exporter.timer
+[Unit]
+Description=Thread active health exporter timer
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=120
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target
 ```
 
 ## Tools
@@ -85,6 +159,10 @@ No raw CLI access is exposed. If the AI needs a command that isn't available, it
 
 Designed for the Arduino Nano Matter (Silicon Labs MGM240SD22VNA) running OpenThread CLI firmware from [swannman/ot-efr32](https://github.com/swannman/ot-efr32) (branch `arduino-nano-matter`).
 
-The serial port name varies by OS:
-- **macOS**: `/dev/cu.usbmodem*`
-- **Linux** (pibot): `/dev/ttyACM0` (typically)
+The board exposes two USB CDC interfaces. On Linux, these appear as two serial ports:
+
+- `/dev/ttyACM0` — RA4M1 bridge (not used for CLI)
+- `/dev/ttyACM1` — MGM240 OpenThread CLI
+
+On macOS only one port is visible:
+- `/dev/cu.usbmodem*` — OpenThread CLI

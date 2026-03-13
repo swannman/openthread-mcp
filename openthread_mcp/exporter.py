@@ -134,6 +134,33 @@ def discover_dns_names(conn: OTCLIConnection) -> dict[str, list[str]]:
     return names
 
 
+def resolve_meshcop_eui64s(conn: OTCLIConnection,
+                           names: list[str]) -> dict[str, str]:
+    """Resolve meshcop border routers to EUI-64 via the xa TXT field.
+
+    Returns {eui64_key: room_name} e.g. {"0x522B784FF40A4D82": "Family Room"}.
+    """
+    result = {}
+    for name in names:
+        try:
+            escaped = name.replace(" ", "\\ ")
+            response = conn.send_command(
+                f"dns service {escaped} _meshcop._udp.default.service.arpa.",
+                timeout=LONG_TIMEOUT,
+            )
+            # Parse xa= from TXT record: xa=522b784ff40a4d82
+            m = re.search(r"\bxa=([0-9a-fA-F]{16})\b", response)
+            if m:
+                eui_key = f"0x{m.group(1).upper()}"
+                result[eui_key] = name
+                logger.info("Resolved border router '%s' -> %s", name, eui_key)
+            else:
+                logger.debug("No xa field in meshcop TXT for '%s'", name)
+        except (OTCLIError, TimeoutError) as e:
+            logger.warning("dns service '%s' failed: %s", name, e)
+    return result
+
+
 def load_devices(path: str) -> dict:
     """Load devices.json."""
     try:
@@ -188,8 +215,9 @@ def update_devices_from_topology(devices: dict, routers: list[dict],
     return changed
 
 
-def update_devices_from_dns(devices: dict, dns_names: dict) -> bool:
-    """Store discovered DNS-SD names in devices. Returns True if changed."""
+def update_devices_from_dns(devices: dict, dns_names: dict,
+                            meshcop_eui64s: dict[str, str] | None = None) -> bool:
+    """Store discovered DNS-SD names and rename border routers. Returns True if changed."""
     changed = False
     # Store border router names
     meshcop = dns_names.get("_meshcop._udp.default.service.arpa", [])
@@ -207,6 +235,23 @@ def update_devices_from_dns(devices: dict, dns_names: dict) -> bool:
         if old != hap:
             devices[key] = hap
             changed = True
+    # Rename border routers using resolved EUI-64 -> room name
+    if meshcop_eui64s:
+        for eui_key, room_name in meshcop_eui64s.items():
+            if eui_key in devices and devices[eui_key] != room_name:
+                old_name = devices[eui_key]
+                devices[eui_key] = room_name
+                # Also update any RLOC16 entries that had the old name
+                for addr, name in list(devices.items()):
+                    if name == old_name and addr != eui_key and isinstance(name, str):
+                        devices[addr] = room_name
+                        logger.info("Renamed %s: '%s' -> '%s'", addr, old_name, room_name)
+                logger.info("Renamed %s: '%s' -> '%s'", eui_key, old_name, room_name)
+                changed = True
+            elif eui_key not in devices:
+                devices[eui_key] = room_name
+                logger.info("Added border router %s -> '%s'", eui_key, room_name)
+                changed = True
     return changed
 
 
@@ -443,10 +488,15 @@ def run_once(port: str, baudrate: int, prom_path: str, devices_path: str) -> Non
         logger.info("Pinging %d neighbors...", len(topology["neighbors"]))
         pings = collect_pings(conn, topology["neighbors"])
 
-        # Discover DNS-SD names
+        # Discover DNS-SD names and resolve border router EUI-64s
         logger.info("Discovering DNS-SD names...")
         dns_names = discover_dns_names(conn)
-        if update_devices_from_dns(devices, dns_names):
+        meshcop_eui64s = {}
+        meshcop_names = dns_names.get("_meshcop._udp.default.service.arpa", [])
+        if meshcop_names:
+            logger.info("Resolving %d border router EUI-64s...", len(meshcop_names))
+            meshcop_eui64s = resolve_meshcop_eui64s(conn, meshcop_names)
+        if update_devices_from_dns(devices, dns_names, meshcop_eui64s):
             devices_changed = True
 
         # Save updated devices if changed

@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 openthread-mcp = "openthread_mcp.server:main"
+openthread-exporter = "openthread_mcp.exporter:main"
 
 [build-system]
 requires = ["hatchling"]

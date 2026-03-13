@@ -155,13 +155,23 @@ def save_devices(path: str, devices: dict) -> None:
         logger.warning("Failed to save devices: %s", e)
 
 
+def _normalize_rloc16(rloc: str) -> str:
+    """Normalize RLOC16 to uppercase 0xNNNN format for consistent lookups."""
+    if rloc.startswith("0x") or rloc.startswith("0X"):
+        try:
+            return f"0x{int(rloc, 16):04X}"
+        except ValueError:
+            pass
+    return rloc
+
+
 def update_devices_from_topology(devices: dict, routers: list[dict],
                                  children: list[dict]) -> bool:
     """Add any new EUI-64 <-> RLOC16 mappings. Returns True if changed."""
     changed = False
     for entry in routers + children:
         ext_mac = entry.get("Extended MAC", "")
-        rloc16 = entry.get("RLOC16", "")
+        rloc16 = _normalize_rloc16(entry.get("RLOC16", ""))
         if not ext_mac or ext_mac == "0000000000000000" or not rloc16:
             continue
         eui_key = f"0x{ext_mac.upper()}"
@@ -198,6 +208,22 @@ def update_devices_from_dns(devices: dict, dns_names: dict) -> bool:
             devices[key] = hap
             changed = True
     return changed
+
+
+def _device_name(devices: dict, *keys: str) -> str:
+    """Look up device name, trying each key with normalized RLOC16 case."""
+    for key in keys:
+        if key in devices:
+            return devices[key]
+        normalized = _normalize_rloc16(key)
+        if normalized in devices:
+            return devices[normalized]
+        # Also try uppercase EUI format
+        if key.startswith("0x") and len(key) > 6:
+            upper_key = f"0x{key[2:].upper()}"
+            if upper_key in devices:
+                return devices[upper_key]
+    return ""
 
 
 def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None],
@@ -237,10 +263,17 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
     # Leader info
     leader = topology.get("leader_data", {})
     if leader:
-        leader_rloc = leader.get("Leader RLOC16", "")
+        # Leader Router ID needs conversion to RLOC16: router_id << 10
+        leader_router_id = leader.get("Leader Router ID", "")
+        leader_rloc = ""
+        if leader_router_id:
+            try:
+                leader_rloc = f"0x{int(leader_router_id) << 10:04X}"
+            except ValueError:
+                pass
         partition = leader.get("Partition ID", "")
         weight = leader.get("Weighting", "")
-        leader_name = devices.get(leader_rloc, "")
+        leader_name = _device_name(devices, leader_rloc)
         lines.append("# HELP thread_active_leader_info Current leader from active probe")
         lines.append("# TYPE thread_active_leader_info gauge")
         label_parts = [f'leader_rloc16="{leader_rloc}"']
@@ -261,7 +294,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
             rloc = n.get("RLOC16", "")
             ext_mac = n.get("Extended MAC", "")
             avg_rssi = n.get("Avg RSSI", "")
-            name = devices.get(rloc, devices.get(f"0x{ext_mac.upper()}", ""))
+            name = _device_name(devices, rloc, f"0x{ext_mac.upper()}")
             label_parts = [f'rloc16="{rloc}"']
             if ext_mac:
                 label_parts.append(f'ext_mac="{ext_mac}"')
@@ -276,7 +309,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
         for n in neighbors:
             rloc = n.get("RLOC16", "")
             last_rssi = n.get("Last RSSI", "")
-            name = devices.get(rloc, "")
+            name = _device_name(devices, rloc)
             label_parts = [f'rloc16="{rloc}"']
             if name:
                 label_parts.append(f'device="{name}"')
@@ -293,7 +326,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
             ext_mac = r.get("Extended MAC", "")
             lq_in = r.get("LQ In", "")
             path_cost = r.get("Path Cost", "")
-            name = devices.get(rloc, devices.get(f"0x{ext_mac.upper()}", ""))
+            name = _device_name(devices, rloc, f"0x{ext_mac.upper()}")
             label_parts = [f'rloc16="{rloc}"']
             if ext_mac and ext_mac != "0000000000000000":
                 label_parts.append(f'ext_mac="{ext_mac}"')
@@ -308,7 +341,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
         for r in routers:
             rloc = r.get("RLOC16", "")
             path_cost = r.get("Path Cost", "")
-            name = devices.get(rloc, "")
+            name = _device_name(devices, rloc)
             label_parts = [f'rloc16="{rloc}"']
             if name:
                 label_parts.append(f'device="{name}"')
@@ -321,7 +354,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
         lines.append("# HELP thread_active_ping_rtt Ping RTT to neighbor (ms, -1 = timeout)")
         lines.append("# TYPE thread_active_ping_rtt gauge")
         for rloc, rtt in sorted(pings.items()):
-            name = devices.get(rloc, "")
+            name = _device_name(devices, rloc)
             label_parts = [f'rloc16="{rloc}"']
             if name:
                 label_parts.append(f'device="{name}"')
@@ -332,7 +365,7 @@ def write_metrics(prom_path: str, topology: dict, pings: dict[str, float | None]
         lines.append("# HELP thread_active_ping_reachable Neighbor reachable via ping (1=yes, 0=no)")
         lines.append("# TYPE thread_active_ping_reachable gauge")
         for rloc, rtt in sorted(pings.items()):
-            name = devices.get(rloc, "")
+            name = _device_name(devices, rloc)
             label_parts = [f'rloc16="{rloc}"']
             if name:
                 label_parts.append(f'device="{name}"')
